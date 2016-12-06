@@ -3,6 +3,6 @@
 # project subdirectory.
 #
 
-PROJECT_NAME := logocontrol
+PROJECT_NAME := esp32-ota-demo
 
 include $(IDF_PATH)/make/project.mk

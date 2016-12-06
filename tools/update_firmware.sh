@@ -1,10 +1,27 @@
 #!/bin/bash
 
-/usr/bin/hexdump -v -e '4096/1 "%02x" "\n"' logocontrol.bin > /tmp/logocontrol.hex
+HEXDUMP=/usr/bin/hexdump
+
+#
+# Prepare the binary input data for the OTA update.
+#
+
+# We need as input arguments the target IP address and binary file to upload.
+if [ $# -ne 2 ]
+then
+  echo "usage: $0 <ip-address> <input.bin>"
+  exit -1
+fi
+
+echo "Target IP address: $1"
+echo "Binary input file: $2"
+
+# Split the binary file in 
+$HEXDUMP -v -e '4096/1 "%02x" "\n"' "$2" > /tmp/esp32_ota.hex
 
 NCSUCCESS="OK"
 LINECTR=1
-NOFLINES="$(/usr/bin/wc -l < /tmp/logocontrol.hex)"
+NOFLINES="$(/usr/bin/wc -l < /tmp/esp32_ota.hex)"
 
 #
 # Tell the ESP32 application that we want to start an OTA update.
@@ -12,7 +29,7 @@ NOFLINES="$(/usr/bin/wc -l < /tmp/logocontrol.hex)"
 
 echo "Starting OTA update on target..."
 
-NCRESULT_START="$(echo '!['| nc 192.168.33.52 80)"
+NCRESULT_START="$(echo '![' | nc $1 80)"
 if [[ "$NCRESULT_START" == *"$NCSUCCESS"* ]]
 then
   echo "Success!"
@@ -26,12 +43,12 @@ fi
 # The Thing will store every block in the flash memory.
 #
 
-echo "Transferring binary data to target..."
+echo "Transferring binary data to target $1..."
 
 while read HEXLINE; do
 
   DATA="!$HEXLINE\r\n"
-  NCRESULT_DATA="$(echo $DATA | nc 192.168.33.52 80)"
+  NCRESULT_DATA="$(echo $DATA | nc $1 80)"
 
   if [[ "$NCRESULT_DATA" == *"$NCSUCCESS"* ]]
   then
@@ -43,7 +60,7 @@ while read HEXLINE; do
     exit -1
   fi
 
-done < /tmp/logocontrol.hex
+done < /tmp/esp32_ota.hex
 
 #
 # Last but not least, tell the target that the update has been completed and trigger a re-boot.
@@ -51,7 +68,7 @@ done < /tmp/logocontrol.hex
 
 echo "Finalizing OTA update..."
 
-NCRESULT_FINISH="$(echo '!]'| nc 192.168.33.52 80)"
+NCRESULT_FINISH="$(echo '!]'| nc $1 80)"
 if [[ "$NCRESULT_FINISH" == *"$NCSUCCESS"* ]]
 then
   echo "Success!"
@@ -62,7 +79,7 @@ fi
 
 echo "Triggering a Re-boot..."
 
-NCRESULT_REBOOT="$(echo '!*'| nc 192.168.33.52 80)"
+NCRESULT_REBOOT="$(echo '!*'| nc $1 80)"
 if [[ "$NCRESULT_REBOOT" == *"$NCSUCCESS"* ]]
 then
   echo "Success!"
