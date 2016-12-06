@@ -5,7 +5,7 @@
 //  Updating the firmware over the air.
 //
 //  Created by Andreas Schweizer on 25.11.2016.
-//  Copyright © 2016 ClassyCode GmbH. 
+//  Copyright © 2016 Classy Code GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
