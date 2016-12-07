@@ -6,3 +6,4 @@ esp32-ota is a small demo application that shows how to upload new firmware imag
 
 - Application code for the ESP32 to connect to an access point, listen for firmware update requests and write new firmware into flash memory.
 
+More information is available on our blog: https://blog.classycode.com/over-the-air-updating-an-esp32-29f83ebbcca2#.g5nwb78eb
