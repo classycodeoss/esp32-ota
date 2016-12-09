@@ -40,6 +40,13 @@
 #include "ota_update.h"
 
 
+typedef enum {
+    NWR_READ_COMPLETE = 0,
+    NWR_READ_TIMEOUT = 1,
+    NWR_DISCONNECTED = 2,
+    NWR_ERROR = 3,
+} TNetworkResult;
+
 #define TAG "network"
 
 #define NORM_C(c) (((c) >= 32 && (c) < 127) ? (c) : '.')
@@ -56,10 +63,10 @@ static int sRebootAfterReply;
 static void networkTask(void *pvParameters);
 
 
-static void processMessage(const char *message, char *responseBuf, int responseBufLen);
+static void processMessage(const char *message, int messageLen, char *responseBuf, int responseBufLen);
+static int networkReceive(int s, char *buf, int maxLen, int *actualLen);
 static void networkSetConnected(uint8_t c);
 static esp_err_t eventHandler(void *ctx, system_event_t *event);
-
 
 void networkInit()
 {
@@ -100,7 +107,9 @@ int networkIsConnected()
 
 static void networkTask(void *pvParameters)
 {
-    int e;
+    const int maxRequestLen = 10000;
+    const int maxResponseLen = 1000;
+    const int tcpPort = 80;
     
     ESP_LOGI(TAG, "networkTask");
     
@@ -108,33 +117,31 @@ static void networkTask(void *pvParameters)
 
         // Barrier for the connection (we need to be connected to an AP).
         xEventGroupWaitBits(sEventGroup, AP_CONNECTION_ESTABLISHED, false, true, portMAX_DELAY);
-        ESP_LOGI(TAG, "connected to access point");
+        ESP_LOGI(TAG, "networkTask: connected to access point");
         
         
         // Create TCP socket.
         
         int s = socket(AF_INET, SOCK_STREAM, 0);
         if (s < 0) {
-            ESP_LOGE(TAG, "socket() failed");
+            ESP_LOGE(TAG, "networkTask: failed to create socket: %d (%s)", errno, strerror(errno));
             vTaskDelay(1000 / portTICK_RATE_MS);
             continue;
         }
         
         
-        // Bind socket to port 80.
+        // Bind socket to port.
         
         struct sockaddr_in serverAddr;
         memset(&serverAddr, 0, sizeof (struct sockaddr_in));
         serverAddr.sin_len = sizeof(struct sockaddr_in);
         serverAddr.sin_family = AF_INET;
-        serverAddr.sin_port = htons(80);
+        serverAddr.sin_port = htons(tcpPort);
         serverAddr.sin_addr.s_addr = INADDR_ANY;
         
-        ESP_LOGI(TAG, "bind(%d, ...)", s);
         int b = bind(s, (struct sockaddr *)&serverAddr, sizeof(struct sockaddr_in));
         if (b < 0) {
-            e = errno;
-            ESP_LOGE(TAG, "bind() failed (%d, errno = %d)", b, e);
+            ESP_LOGE(TAG, "networkTask: failed to bind socket %d: %d (%s)", s, errno, strerror(errno));
             vTaskDelay(1000 / portTICK_RATE_MS);
             continue;
         }
@@ -142,101 +149,115 @@ static void networkTask(void *pvParameters)
         
         // Listen to incoming connections.
         
-        ESP_LOGI(TAG, "listen()");
+        ESP_LOGD(TAG, "networkTask: 'listen' on socket %d", s);
         listen(s, 1); // backlog max. 1 connection
         while (1) {
             
             
             // Accept the connection on a separate socket.
             
-            ESP_LOGI(TAG, "accept()");
+            ESP_LOGD(TAG, "--------------------");
+            ESP_LOGD(TAG, "networkTask: 'accept' on socket %d", s);
             struct sockaddr_in clientAddr;
             socklen_t clen = sizeof(clientAddr);
             int s2 = accept(s, (struct sockaddr *)&clientAddr, &clen);
             if (s2 < 0) {
-                e = errno;
-                ESP_LOGE(TAG, "accept() failed (%d, errno = %d)", s2, e);
+                ESP_LOGE(TAG, "networkTask: 'accept' failed: %d (%s)", errno, strerror(errno));
                 vTaskDelay(1000 / portTICK_RATE_MS);
                 break;
             }
             
-            // (Would normally fork here)
+            // Would normally fork here.
+            // For the moment, we support only a single open connection at any time.
             
             do {
-                ESP_LOGI(TAG, "receiving data...");
+                //ESP_LOGD(TAG, "networkTask: waiting for data on socket %d...", s2);
 
 
                 // Allocate and clear memory for the request data.
                 
-                int maxRequestLen = 10000;
                 char *requestBuf = malloc(maxRequestLen * sizeof(char));
                 if (!requestBuf) {
-                    e = errno;
-                    ESP_LOGE(TAG, "malloc for requestBuf failed (errno = %d)!", e);
+                    ESP_LOGE(TAG, "networkTask: malloc for requestBuf failed: %d (%s)", errno, strerror(errno));
                     break;
                 }
-                bzero(requestBuf, sizeof(requestBuf) / sizeof(char));
+                bzero(requestBuf, maxRequestLen);
                 
                 
                 // Read the request and store it in the allocated buffer.
                 
                 int totalRequestLen = 0;
-                int n = 0;
-                int e = 0;
+                TNetworkResult result = networkReceive(s2, requestBuf, maxRequestLen, &totalRequestLen);
                 
-                do {
-                    ESP_LOGI(TAG, "read(%d, ..., %d)", s2, maxRequestLen - totalRequestLen);
-                    n = read(s2, &requestBuf[totalRequestLen], maxRequestLen - totalRequestLen);
-                    e = errno;
-                    if (n > 0) {
-                        totalRequestLen += n;
-                    }
-                } while (n > 0 && totalRequestLen < maxRequestLen);
-
-                if (n < 0) {
+                if (result != NWR_READ_COMPLETE) {
+                    ESP_LOGI(TAG, "nothing more to, closing socket %d", s2);
                     free(requestBuf);
                     close(s2);
-                    ESP_LOGE(TAG, "read() failed (%d)", e);
-                    vTaskDelay(1000 / portTICK_RATE_MS);
                     break;
                 }
-            
             
                 // Read completed successfully.
                 // Process the request and create the response.
             
-                ESP_LOGI(TAG, "received %d bytes: %02x %02x %02x %02x ... | %c%c%c%c...",
+                ESP_LOGI(TAG, "networkTask: received %d bytes: %02x %02x %02x %02x ... | %c%c%c%c...",
                          totalRequestLen,
                          requestBuf[0], requestBuf[1], requestBuf[2], requestBuf[3],
                          NORM_C(requestBuf[0]), NORM_C(requestBuf[1]), NORM_C(requestBuf[2]), NORM_C(requestBuf[3]));
             
             
-                char responseBuf[1000];
-                processMessage(requestBuf, responseBuf, sizeof(responseBuf) / sizeof(char));
+                char *responseBuf = malloc(maxResponseLen * sizeof(char));
+                processMessage(requestBuf, totalRequestLen, responseBuf, maxResponseLen);
 
                 free(requestBuf);
                 
                 
                 // Send the response back to the client.
             
-                ESP_LOGI(TAG, "write() %d bytes", strlen(responseBuf));
-                n = write(s2, responseBuf, strlen(responseBuf));
-                if (n < 0) {
-                    ESP_LOGE(TAG, "write() failed (%d)", n);
-                } else {
-                    ESP_LOGI(TAG, "write() succeeded, n = %d", n);
-                }
+                int totalLen = strlen(responseBuf);
+                int nofWritten = 0;
+                ESP_LOGD(TAG, "networkTask: write %d bytes to socket %d: %02x %02x %02x %02x ... | %c%c%c%c...", totalLen, s2,
+                         responseBuf[0], responseBuf[1], responseBuf[2], responseBuf[3],
+                         NORM_C(responseBuf[0]), NORM_C(responseBuf[1]), NORM_C(responseBuf[2]), NORM_C(responseBuf[3]));
+
+                do {
+                    int n = write(s2, &responseBuf[nofWritten], totalLen - nofWritten);
+                    int e = errno;
+                    //ESP_LOGD(TAG, "networkTask: write: socket %d, n = %d, errno = %d", s2, n, e);
+                    
+                    if (n > 0) {
+                        nofWritten += n;
+                        
+                        // More to write?
+                        if (totalLen - nofWritten == 0) {
+                            break;
+                        }
+                        
+                    } else if (n == 0) {
+                        // Disconnected?
+                        break;
+                        
+                    } else {
+                        // n < 0
+                        if (e == EAGAIN) {
+                            //ESP_LOGD(TAG, "networkTask: write: EAGAIN");
+                            continue;
+                        }
+                        ESP_LOGE(TAG, "networkTask: write failed: %d (%s)", errno, strerror(errno));
+                        break;
+                    }
+                    
+                } while (1);
                 
-            } while (0);
-            
-            ESP_LOGI(TAG, "closing socket %d", s2);
-            close(s2);
-            
-            if (sRebootAfterReply) {
-                ESP_LOGI(TAG, "Reboot in 2 seconds...");
-                vTaskDelay(2000 / portTICK_RATE_MS);
-                esp_restart();
-            }
+                free(responseBuf);
+                
+                
+                if (sRebootAfterReply) {
+                    ESP_LOGI(TAG, "networkTask: Reboot in 2 seconds...");
+                    vTaskDelay(2000 / portTICK_RATE_MS);
+                    esp_restart();
+                }
+
+            } while (1);
         }
         
         // Should never arrive here
@@ -245,7 +266,64 @@ static void networkTask(void *pvParameters)
     }
 }
 
-static void processMessage(const char *message, char *responseBuf, int responseBufLen)
+static int networkReceive(int s, char *buf, int maxLen, int *actualLen)
+{
+    //ESP_LOGI(TAG, "networkReceive: start maxlen = %d", maxLen);
+    
+    int totalLen = 0;
+    
+    for (int timeoutCtr = 0; timeoutCtr < 3000; timeoutCtr++) {
+
+        int readAgain = 0;
+        do {
+            buf[totalLen] = 0x00;
+            int n = recv(s, &buf[totalLen], maxLen - totalLen, MSG_DONTWAIT);
+            int e = errno;
+
+            // Error?
+            if (n > 0) {
+                // Message complete?
+                totalLen += n;
+                if (totalLen > 0) {
+                    // We currently support two record types:
+                    // Records that start with !xxxx where x is a hexadecimal length indicator
+                    // Records that start with something else and are terminated with a newline
+                    int recordLen = 0;
+                    int recordWithLengthIndicator = (1 == sscanf(buf, "!%04x", &recordLen));
+                    ESP_LOGD(TAG, "networkReceive: recordWithLengthIndicator = %d, expected length = %d, current length = %d", recordWithLengthIndicator, recordLen, totalLen);
+                    if ((recordWithLengthIndicator && totalLen == recordLen)
+                        || (!recordWithLengthIndicator && buf[totalLen - 1] == '\n'))
+                    {
+                        ESP_LOGI(TAG, "networkReceive: received %d byte packet on socket %d", totalLen, s);
+                        *actualLen = totalLen;
+                        return NWR_READ_COMPLETE;
+                    }
+                }
+                // Not yet complete. Read again immediately.
+                readAgain = 1;
+                
+            } else if (n < 0 && e == EAGAIN) {
+                // No data available right now.
+                // Wait for a short moment before trying again.
+                readAgain = 0;
+
+            } else {
+                // Error (n=0, n<0).
+                ESP_LOGE(TAG, "recv n = %d, errno = %d (%s)", n, e, strerror(e));
+                return NWR_ERROR;
+            }
+            
+        } while (readAgain);
+        
+        // n == 0, wait a bit
+        //ESP_LOGI(TAG, "networkReceive: wait for more data");
+        vTaskDelay(10 / portTICK_RATE_MS);
+    }
+    
+    return NWR_READ_TIMEOUT;
+}
+
+static void processMessage(const char *message, int messageLen, char *responseBuf, int responseBufLen)
 {
     // Response to send back to the TCP client.
     char response[256];
@@ -255,19 +333,23 @@ static void processMessage(const char *message, char *responseBuf, int responseB
         TOtaResult result = OTA_OK;
         
         if (message[1] == '[') {
+            ESP_LOGI(TAG, "processMessage: OTA start");
             result = otaUpdateBegin();
             
         } else if (message[1] == ']') {
+            ESP_LOGI(TAG, "processMessage: OTA end");
             result = otaUpdateEnd();
             
         } else if (message[1] == '*') {
+            ESP_LOGI(TAG, "processMessage: Reboot");
             sRebootAfterReply = 1;
             
         } else {
-            result = otaUpdateWriteHexData(&message[1]);
+            result = otaUpdateWriteHexData(&message[5], messageLen - 5);
         }
 
         if (result != OTA_OK) {
+            ESP_LOGE(TAG, "processMessage: OTA_ERROR %d", result);
             sprintf(response, "OTA_ERROR %d\r\n", result);
         }
         

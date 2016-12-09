@@ -42,7 +42,7 @@ int otaUpdateInProgress();
 TOtaResult otaUpdateBegin();
 
 // Call this function for every line with up to 4 kBytes of hex data.
-TOtaResult otaUpdateWriteHexData(const char *hexData);
+TOtaResult otaUpdateWriteHexData(const char *hexData, int len);
 
 // Finish an OTA update.
 TOtaResult otaUpdateEnd();

@@ -101,23 +101,12 @@ TOtaResult otaUpdateEnd()
     return OTA_ERR_PARTITION_NOT_ACTIVATED;
 }
 
-TOtaResult otaUpdateWriteHexData(const char *hexData)
+TOtaResult otaUpdateWriteHexData(const char *hexData, int len)
 {
     uint8_t buf[4096];
     
     for (int i = 0; i < 4096; i++) {
-        buf[i] = 0xff;
-    }
-    
-    // Parse the input string (maximum 4k bytes of hexadecimal data).
-    int nofBytes = 0;
-    for (int i = 0; i < 4096; i++, hexData += 2) {
-        int curByte;
-        if (1 != sscanf(hexData, "%02x", &curByte)) {
-            break;
-        }
-        buf[i] = (uint8_t)curByte;
-        nofBytes++;
+        buf[i] = (i < len) ? hexData[i] : 0xff;
     }
 
     // Erase flash pages at 4k boundaries.
@@ -130,13 +119,13 @@ TOtaResult otaUpdateWriteHexData(const char *hexData)
     // Write data into flash memory.
     ESP_LOGI("ota_update", "Writing flash at 0x%08x...", sFlashCurrentAddress);
     // esp_err_t result = spi_flash_write(sFlashCurrentAddress, buf, 4096);
-    esp_err_t result = esp_ota_write(sOtaHandle, buf, nofBytes);
+    esp_err_t result = esp_ota_write(sOtaHandle, buf, len);
     if (result != ESP_OK) {
         ESP_LOGE("ota_update", "Failed to write flash at address 0x%08x, error %d", sFlashCurrentAddress, result);
         return OTA_ERR_WRITE_FAILED;
     }
 
-    sFlashCurrentAddress += nofBytes;
+    sFlashCurrentAddress += len;
     return OTA_OK;
 }
 
